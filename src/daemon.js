@@ -155,7 +155,7 @@ class WalkieDaemon {
           if (ch && ch.subscribers.has(id)) ch.subscribers.get(id).lastSeen = Date.now()
           const { total, local, peers, recipients, msgId } = this._send(cmd.channel, cmd.message, id, cmd.replyTo, cmd.to)
           const mine = ch && ch.subscribers.has(id) ? ch.subscribers.get(id).messages.length : 0
-          reply({ ok: true, delivered: total, localSubscribers: local, peerDaemons: peers, recipients, unread: mine, msgId })
+          reply({ ok: true, delivered: total, localSubscribers: local, peerDaemons: peers, recipients, unread: mine, msgId, persisted: !!(ch && ch.persist) })
           break
         }
         case 'awaitReply': {

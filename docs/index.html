@@ -238,6 +238,34 @@
       opacity: 0.7;
     }
 
+    .starter {
+      padding: 8px 0 32px;
+    }
+
+    .prompt-body {
+      padding: 16px;
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.7;
+      color: var(--text);
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+    .copy-btn {
+      margin-left: auto;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 0.75rem;
+      padding: 3px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+    .copy-btn.copied { color: var(--accent); border-color: var(--accent-dim); }
+
     .terminal-body {
       padding: 16px;
       font-family: var(--mono);
@@ -512,6 +540,29 @@
       </div>
     </section>
 
+    <!-- Starter prompt -->
+    <section class="starter">
+      <div class="terminal">
+        <div class="terminal-header">
+          <div class="dot"></div>
+          Paste into your first agent session
+          <button class="copy-btn" type="button" data-target="starter-prompt">Copy</button>
+        </div>
+        <pre id="starter-prompt" class="prompt-body">You are being connected to other AI agents working in other terminal sessions,
+possibly on other machines, so you can talk to each other directly — ask
+questions, hand off work, coordinate. walkie is the CLI that carries those
+messages: peer to peer, no server, no account.
+
+Set up: run `walkie --version || npm install -g walkie-sh` (needs Node 18+),
+then `walkie invite &lt;short-name&gt; --about "&lt;what we are doing here&gt;"`. If I have
+not told you what we are doing, ask me before running it rather than dropping
+the flag.
+
+That prints a briefing. Show it to me exactly as printed — I will paste it into
+the other sessions — and then follow it yourself.</pre>
+      </div>
+    </section>
+
     <!-- Use Cases -->
     <section class="use-cases">
       <h2 class="section-header">What people use it for</h2>
@@ -634,8 +685,12 @@ walkie read ops --wait</code>
     <!-- Commands -->
     <section class="commands">
       <h2 class="section-header">Commands</h2>
-      <p style="color:var(--muted); font-size:0.85rem; text-align:center; margin-bottom:20px;">All channel args accept <code style="background:var(--surface);padding:1px 5px;border-radius:3px;font-size:0.9em;">channel:secret</code> format. No colon = secret defaults to channel name.</p>
+      <p style="color:var(--muted); font-size:0.85rem; text-align:center; margin-bottom:20px;">All channel args accept <code style="background:var(--surface);padding:1px 5px;border-radius:3px;font-size:0.9em;">channel:secret</code> format. No colon = the secret defaults to the channel name, which means anyone who guesses the name can join &mdash; use <code style="background:var(--surface);padding:1px 5px;border-radius:3px;font-size:0.9em;">walkie invite</code> for a random one.</p>
       <table class="cmd-table">
+        <tr>
+          <td>walkie invite [name]</td>
+          <td>Mint a channel + random secret and print a briefing to paste into your agent sessions. <code style="font-size:0.82em">--join</code> to sit in the channel too, <code style="font-size:0.82em">--token-only</code> for just the token.</td>
+        </tr>
         <tr>
           <td>walkie chat &lt;channel&gt;</td>
           <td>Interactive chat. Same name = same room. <code style="font-size:0.82em">--secret</code> for private channels.</td>
@@ -650,7 +705,11 @@ walkie read ops --wait</code>
         </tr>
         <tr>
           <td>walkie send &lt;channel&gt; "msg"</td>
-          <td>Send a message. Reads from stdin if no message given.</td>
+          <td>Send a message. Reads from stdin if no message given. <code style="font-size:0.82em">--wait-for-peer</code> waits for a recipient instead of dropping it.</td>
+        </tr>
+        <tr>
+          <td>walkie next &lt;channel&gt;</td>
+          <td>Block until someone <em>else</em> says something real, print it, exit. The primitive for agent loops. <code style="font-size:0.82em">--timeout N</code>.</td>
         </tr>
         <tr>
           <td>walkie read &lt;channel&gt;</td>
@@ -709,5 +768,30 @@ walkie read ops --wait</code>
 
   </div>
 
+  <script>
+    document.querySelectorAll('.copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var el = document.getElementById(btn.dataset.target)
+        if (!el) return
+        var done = function () {
+          btn.textContent = 'Copied'
+          btn.classList.add('copied')
+          setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('copied') }, 1600)
+        }
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(el.textContent).then(done, function () { select(el) })
+        } else {
+          select(el)
+        }
+      })
+    })
+    function select (el) {
+      var r = document.createRange()
+      r.selectNodeContents(el)
+      var sel = window.getSelection()
+      sel.removeAllRanges()
+      sel.addRange(r)
+    }
+  </script>
 </body>
 </html>

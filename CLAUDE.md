@@ -41,15 +41,15 @@ await walkie.send('mychannel:secret', 'hello', { id: 'sender' })
 
 ## Testing
 
-`npm test` — 99 automated tests using `node:test` (zero extra deps). Covers crypto, store, CLI utils, daemon IPC, web server, and programmatic API.
+`npm test` — 120 automated tests using `node:test` (zero extra deps). Covers crypto, store, CLI utils, daemon IPC, web server, and programmatic API.
 
 `npm run test:p2p` — manual P2P integration test (two daemons, Hyperswarm discovery, ~30s).
 
 Manual same-machine test with two identities:
 ```bash
 walkie stop
-WALKIE_ID=alice walkie create test -s secret
-WALKIE_ID=bob walkie join test -s secret
+WALKIE_ID=alice walkie connect test:secret
+WALKIE_ID=bob walkie connect test:secret
 WALKIE_ID=alice walkie send test "hello"
 WALKIE_ID=bob walkie read test
 ```
@@ -101,6 +101,50 @@ instapods deploy walkie --local docs --preset static
 
 ## Key decisions
 
+- `walkie pair` was removed in v1.7.0: it was two `walkie agent` invocations plus a
+  kickoff task, i.e. a second orchestration path to keep working for no capability the
+  first did not already have. Precedent for removing a command in a minor is v1.3.0
+  (`--as`). Its 1.6.0 changelog entry stays — a changelog records what shipped
+- `--await-reply` implies `--wait-for-peer` and the timeout is one overall deadline
+  across both halves. Awaiting a reply on an empty channel could only ever fail: the
+  send exits 3 before any waiting happens
+- `chat`/`agent`/`slack` default the secret to the channel name, so `walkie chat standup`
+  is joinable by anyone who guesses "standup" on the public DHT. Kept for casual use but
+  it now warns — the failure is invisible from inside the channel
+- `walkie watch` defaults to JSONL and inverts with `--pretty`, the opposite of
+  read/log/next. The default cannot change without breaking scripts, so `--json` is
+  accepted as a no-op alias; the flag now means the same thing on every command
+- A send on a `--persist` channel is stored *before* delivery is attempted, so
+  "reached nobody" is not "lost". It reports `Stored` and exits 0; exit 3 is reserved
+  for a message that is genuinely gone. The daemon's send reply carries `persisted` so
+  the CLI can tell those apart. This is also why the invite briefing uses `--persist`
+  and no longer needs `--wait-for-peer`: with the store in play, arrival order stops
+  mattering and there is no window for the first greeting to fall into
+- `walkie invite` does **not** join the channel it mints (`--join` opts in). An inviter
+  who joins is a subscriber that never reads: it satisfies another agent's
+  `send --wait-for-peer`, which then delivers the opening message into a buffer nobody
+  drains — the exact failure that flag exists to prevent. Caught only by running the
+  real paste-this-into-two-sessions flow end to end; every unit test passed
+- `walkie invite` mints a channel + random 12-byte secret and prints a
+  paste-able briefing (`cli-utils.invitePrompt`) for other agents. It exists because
+  every hand-written version of that briefing got the same three things wrong:
+  dropping `WALKIE_ID` from `connect` (two identities, own messages echo back),
+  rebuilding the read primitive out of four flags, and treating a send as delivery.
+  The briefing lives in cli-utils so it is unit-testable, not inline in bin
+- `walkie next <ch>` == `read --wait --from-others --no-system --drain`. That
+  incantation is the agent loop primitive; making agents assemble it from four flags
+  is where they get it wrong (plain `--wait` burns its wake on your own join notice).
+  `read` and `next` share one `runRead` implementation
+- `send --wait-for-peer [s]` polls `status` until `hasRecipient` is true, then sends
+  once. It must not retry the send: a send with no recipients is still a send — it
+  burns a seq and appends to persisted history — so a retry loop would write the same
+  message into `walkie log` once per attempt for a message nobody received. On
+  timeout it falls through and sends anyway, so the "Queued nowhere" exit 3 is
+  unchanged; a wait that silently swallowed the message would be worse than no flag
+- A daemon cannot name remote participants: `peers` is a connection count and
+  `subscribers` is local-only. `hasRecipient(info, me, want)` therefore treats any
+  peer as satisfying a `--to` wait — refusing would hang whenever the target is
+  simply not on this machine. Real presence needs protocol-level gossip
 - No `--as` flag (removed in v1.3.0)
 - Identity resolves `WALKIE_ID` env > `~/.walkie/config.json` > terminal-session hash > none.
   Env-only was not viable: `~/.bashrc` returns early for non-interactive shells, so agents

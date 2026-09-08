@@ -68,16 +68,41 @@ walkie read ops --wait
 walkie watch ops:mysecret --exec 'echo $WALKIE_MSG'
 ```
 
+## Start a conversation between your agents
+
+Paste this into one AI session (Claude Code, Codex, Cursor — anything with a shell).
+It prints a briefing; paste that into every other session you want on the channel.
+
+```
+You are being connected to other AI agents working in other terminal sessions,
+possibly on other machines, so you can talk to each other directly — ask
+questions, hand off work, coordinate. walkie is the CLI that carries those
+messages: peer to peer, no server, no account.
+
+Set up: run `walkie --version || npm install -g walkie-sh` (needs Node 18+),
+then `walkie invite <short-name> --about "<what we are doing here>"`. If I have
+not told you what we are doing, ask me before running it rather than dropping
+the flag.
+
+That prints a briefing. Show it to me exactly as printed — I will paste it into
+the other sessions — and then follow it yourself.
+```
+
+No session is special: every agent picks its own name, connects, and speaks when it
+has something to say. Add `--about "..."` so they know what the channel is for —
+without it they will ask you rather than invent work.
+
 ## Commands
 
 All channel args accept `channel:secret` format. No colon = secret defaults to channel name.
 
 ```
+walkie invite [name]                     Mint a channel + secret, print the briefing for your agents
 walkie chat <channel>                    Interactive chat. Same name = same room
 walkie agent <channel>                   AI agent that responds via claude/codex/pi
-walkie pair <channel>                    Two AI agents collaborating (brain + executor)
 walkie connect <channel>                 Join a channel programmatically
 walkie send <channel> "message"          Send a message (or pipe from stdin)
+walkie next <channel>                    Block until someone else says something real
 walkie read <channel>                    Read pending messages
 walkie watch <channel>                   Stream messages continuously
 walkie log <channel>                     Read persisted history (non-destructive)
@@ -188,6 +213,17 @@ npx skills add https://github.com/vikasprogrammer/walkie --skill walkie
 ```
 
 ## Changelog
+
+### 1.7.0
+
+- **`walkie invite [name]`** — mints a channel and a random secret and prints a paste-able briefing for the agents that will use it (`--join` to join it yourself; it deliberately does not by default, since an inviter who never reads would satisfy another agent's `--wait-for-peer` and swallow the opening message). `walkie invite ops:secret` reprints the briefing for a channel that already exists; `--token-only` prints just the token
+- **`walkie next <channel>`** — block until another participant says something real, print it, exit. Exactly `read --wait --from-others --no-system --drain`, which is the shape every agent loop wants and the one that is easiest to assemble wrong: plain `read --wait` returns on your own `[system] X joined` notice
+- **`send --wait-for-peer [secs]`** — wait for a recipient before sending, instead of losing the message. There is no offline buffering, so the first message on a fresh channel is normally dropped. On timeout it still sends, still reports "Queued nowhere" and still exits `3`
+- **`--await-reply` now implies that wait** and treats its timeout as one overall deadline. Awaiting a reply on an empty channel could only ever fail
+- **A bare channel name now warns.** `walkie chat standup` derives its topic from the name alone, so anyone who guesses the word joins the room. The convenience stays; the silence does not
+- **`walkie watch` accepts `--json`** for the JSONL it already emits, so the flag means the same thing on every command
+- **Removed `walkie pair`** — two `walkie agent` invocations in two terminals do the same job without a second orchestration path to maintain
+- Removed the long-dead `create` / `join` commands from the docs, which still described them as deprecated years after they stopped existing
 
 ### 1.6.8
 

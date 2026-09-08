@@ -4,13 +4,15 @@ const { program } = require('commander')
 const { request, streamMessages } = require('../src/client')
 const { clientId, chatName, parseChannelArg, resolveIdentity, setIdentity,
   isStableIdentity, identityWarning, configPath, makeMessageFilter, EXIT,
-  drainAfterWake, parseClaudeOutput, parsePiOutput } = require('../src/cli-utils')
+  drainAfterWake, parseClaudeOutput, parsePiOutput, hasRecipient, mintChannel,
+  invitePrompt } = require('../src/cli-utils')
 
 program
   .name('walkie')
   .description(`P2P communication for AI agents. No server. No setup. Just talk.
 
 Getting started:
+  $ walkie invite                            Mint a channel + secret, print the agent briefing
   $ walkie chat mychannel                    Interactive chat (same name = same channel)
   $ walkie agent mychannel                   AI agent that responds via claude/codex/pi
   $ walkie agent mychannel --cli codex       Use a specific AI CLI
@@ -18,6 +20,7 @@ Getting started:
 Programmatic (for agents/scripts):
   $ walkie connect ops:secret                Connect to a channel
   $ walkie send ops "task done"              Send a message
+  $ walkie next ops                          Block until someone else speaks
   $ walkie read ops --wait                   Wait for a message
   $ walkie watch ops:secret --pretty         Stream messages in real-time
 
@@ -31,7 +34,7 @@ How it works:
   A background daemon keeps connections alive between commands.
 
 Docs: https://walkie.sh`)
-  .version('1.6.8')
+  .version('1.7.0')
 
 async function autoJoin(channelArg, cid, persist) {
   const { channel, secret } = parseChannelArg(channelArg)
@@ -65,13 +68,14 @@ function execForMessage(command, msg, channel) {
 program
   .command('chat <channel>')
   .description('Interactive chat — same channel name = same channel')
-  .option('--secret <secret>', 'Custom secret (default: channel name)')
+  .option('--secret <secret>', 'Channel secret (or use channel:secret; defaults to the channel name)')
   .action(async (channelArg, opts) => {
     const readline = require('readline')
     const name = chatName()
     const parsed = parseChannelArg(channelArg)
     const channel = parsed.channel
     const secret = opts.secret || parsed.secret
+    warnGuessableSecret(channel, secret)
 
     try {
       const cid = name
@@ -151,6 +155,15 @@ program
 // non-interactive shells (which is how agents run) fall back to a per-session hash
 // or "default", so anything routing or filtering on sender name keys on a value
 // that changes out from under it.
+// chat/agent/slack default the secret to the channel name, which makes the topic
+// SHA-256(name+name) — anyone who guesses the word joins. Cheap to keep for casual
+// same-name chat, but it must not be silent: the failure is invisible from inside.
+function warnGuessableSecret(channel, secret) {
+  if (secret !== channel) return
+  console.error(`\x1b[33mwarning: no secret set, so "${channel}" is joinable by anyone who guesses that name.`)
+  console.error(`Use ${channel}:<secret>, or run \`walkie invite ${channel}\` for a random one.\x1b[0m`)
+}
+
 function ensureIdentity() {
   if (isStableIdentity()) return clientId()
   const name = require('os').hostname().split('.')[0]
@@ -358,7 +371,7 @@ function runPi(prompt, sessionId, model, extraArgs) {
 program
   .command('agent <channel>')
   .description('AI agent that listens and responds via claude, codex or pi')
-  .option('--secret <secret>', 'Custom secret (default: channel name)')
+  .option('--secret <secret>', 'Channel secret (or use channel:secret; defaults to the channel name)')
   .option('--cli <cli>', 'CLI to use: claude, codex or pi (auto-detected if omitted)')
   .option('--prompt <text>', 'System prompt for the agent')
   .option('--model <model>', 'Model to use')
@@ -380,6 +393,7 @@ program
     const channel = parsed.channel
     const agentName = opts.name || chatName() + '-agent'
     const secret = opts.secret || parsed.secret
+    warnGuessableSecret(channel, secret)
     const cid = agentName
     const extraArgs = opts.agentArgs ? opts.agentArgs.split(/\s+/) : null
     const maxConcurrency = Math.max(1, parseInt(opts.concurrency, 10) || 1)
@@ -508,118 +522,56 @@ program
   })
 
 program
-  .command('pair <channel>')
-  .description('Start two AI agents collaborating on a channel (brain + executor)')
-  .option('--secret <secret>', 'Channel secret')
-  .option('--task <text>', 'Initial task to kick things off')
-  .option('--brain <cli>', 'CLI for brain (default: codex if available, else claude)')
-  .option('--exec-cli <cli>', 'CLI for executor (default: claude if available, else codex)')
-  .option('--model <model>', 'Model for both agents')
-  .option('--agent-args <args>', 'Extra CLI arguments passed to claude/codex (e.g. "--dangerously-skip-permissions")')
-  .action(async (channelArg, opts) => {
-    const { spawn } = require('child_process')
-    const readline = require('readline')
-    const parsed = parseChannelArg(channelArg)
-    const channel = parsed.channel
-    const secret = opts.secret || parsed.secret
+  .command('invite [target]')
+  .description('Mint a channel + secret (or reuse channel:secret) and print the briefing for other agents')
+  .option('--about <text>', 'What this channel is for — stated in the briefing')
+  .option('--join', 'Also join the channel yourself')
+  .option('--token-only', 'Print just the channel:secret token')
+  .option('--persist', 'Enable persistent message storage (implies --join)')
+  .action(async (target, opts) => {
+    try {
+      // A colon means "channel:secret" everywhere else in this CLI, so it means the
+      // same here: reprint the briefing for a channel that already exists. A bare
+      // word is a prefix to mint under — never the whole name, because two invites
+      // in one repo must not land on the same channel.
+      const existing = target && target.indexOf(':') !== -1
+      const { channel, secret } = existing ? parseChannelArg(target) : mintChannel(target)
 
-    // Detect available CLIs
-    const available = []
-    const { spawnSync } = require('child_process')
-    for (const cmd of ['codex', 'claude']) {
-      const r = spawnSync('which', [cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-      if (r.status === 0) available.push(cmd)
-    }
-    if (available.length === 0) {
-      console.error('Error: neither "claude" nor "codex" CLI found.')
+      // Deliberately does NOT join by default. An inviter who joins is a subscriber
+      // that never reads: it satisfies another agent's `send --wait-for-peer`, which
+      // then delivers the opening message into a buffer nobody drains — the exact
+      // failure that flag exists to prevent. Handing out the token is not the same
+      // as being in the room, so joining is opt-in.
+      if (opts.join || opts.persist) {
+        const cmd = { action: 'join', channel, secret, clientId: ensureIdentity() }
+        if (opts.persist) cmd.persist = true
+        const resp = await request(cmd)
+        if (!resp.ok) {
+          console.error(`Error: ${resp.error}`)
+          process.exit(EXIT.ERROR)
+        }
+      }
+
+      if (opts.tokenOnly) {
+        console.log(`${channel}:${secret}`)
+        return
+      }
+      if (opts.join || opts.persist) {
+        console.log(`Connected to channel "${channel}"${opts.persist ? ' [persist]' : ''}`)
+        console.log('')
+      }
+      console.log('\x1b[1mPaste this into every agent session you want on the channel:\x1b[0m')
+      console.log('')
+      console.log(invitePrompt({ channel, secret, about: opts.about }))
+      console.log('')
+      // The token is the secret. Anyone holding it can read the channel, because
+      // the topic is SHA-256(channel+secret) on a public DHT — there is no second
+      // factor and no access list.
+      console.log(`\x1b[2mAnyone with "${channel}:${secret}" can read this channel. Treat it as a password.\x1b[0m`)
+    } catch (e) {
+      console.error(`Error: ${e.message}`)
       process.exit(1)
     }
-
-    // Assign CLIs — prefer codex for brain, claude for executor
-    let brainCli = opts.brain
-    let execCli = opts.execCli
-    if (!brainCli && !execCli) {
-      if (available.includes('codex') && available.includes('claude')) {
-        brainCli = 'codex'
-        execCli = 'claude'
-      } else {
-        brainCli = available[0]
-        execCli = available[0]
-      }
-    } else {
-      brainCli = brainCli || available[0]
-      execCli = execCli || available[0]
-    }
-
-    const brainName = `${channel}-brain`
-    const execName = `${channel}-exec`
-    const brainPrompt = `You are the brain/strategist on walkie channel "#${channel}". Observe what @${execName} reports and provide guidance. Address tasks to @${execName}. Be concise and decisive.`
-    const execPrompt = `You are the executor on walkie channel "#${channel}". Carry out tasks and report results. When you need a decision, ask @${brainName}. Report progress to @${brainName}. Be concise.`
-
-    console.log(`\x1b[1m--- walkie pair: #${channel} ---\x1b[0m`)
-    console.log(`\x1b[2mBrain: "${brainName}" (${brainCli})\x1b[0m`)
-    console.log(`\x1b[2mExecutor: "${execName}" (${execCli})\x1b[0m`)
-    console.log(`\x1b[2mCtrl+C to stop both.\x1b[0m`)
-    console.log()
-
-    // Build args for child processes
-    const scriptPath = __filename
-    const buildArgs = (name, cli, prompt) => {
-      const args = ['agent', channelArg, '--name', name, '--cli', cli, '--prompt', prompt]
-      if (opts.model) args.push('--model', opts.model)
-      if (opts.agentArgs) args.push('--agent-args', opts.agentArgs)
-      return args
-    }
-
-    const brainProc = spawn(process.execPath, [scriptPath, ...buildArgs(brainName, brainCli, brainPrompt)], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, WALKIE_ID: brainName }
-    })
-
-    const execProc = spawn(process.execPath, [scriptPath, ...buildArgs(execName, execCli, execPrompt)], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, WALKIE_ID: execName }
-    })
-
-    // Prefix and display output from both agents
-    const pipe = (proc, label, color) => {
-      readline.createInterface({ input: proc.stdout }).on('line', l =>
-        console.log(`${color}[${label}]\x1b[0m ${l}`))
-      readline.createInterface({ input: proc.stderr }).on('line', l =>
-        console.error(`${color}[${label}]\x1b[0m \x1b[31m${l}\x1b[0m`))
-    }
-    pipe(brainProc, 'brain', '\x1b[35m')
-    pipe(execProc, 'exec', '\x1b[36m')
-
-    // Send initial task to brain after agents are ready
-    if (opts.task) {
-      setTimeout(async () => {
-        try {
-          const cid = 'pair-user'
-          await request({ action: 'join', channel, secret, clientId: cid })
-          await request({ action: 'send', channel, message: `@${brainName} ${opts.task}`, clientId: cid })
-          console.log(`\x1b[2mTask sent → @${brainName}\x1b[0m`)
-        } catch (e) {
-          console.error(`Failed to send task: ${e.message}`)
-        }
-      }, 3000)
-    }
-
-    // Cleanup
-    let exiting = false
-    const cleanup = () => {
-      if (exiting) return
-      exiting = true
-      brainProc.kill('SIGTERM')
-      execProc.kill('SIGTERM')
-      console.log('\n\x1b[2mBoth agents stopped.\x1b[0m')
-      setTimeout(() => process.exit(0), 500)
-    }
-
-    process.on('SIGINT', cleanup)
-    process.on('SIGTERM', cleanup)
-    brainProc.on('exit', () => { if (!exiting) cleanup() })
-    execProc.on('exit', () => { if (!exiting) cleanup() })
   })
 
 program
@@ -648,6 +600,10 @@ program
   .command('watch <channel>')
   .description('Stream messages from a channel (format: channel:secret)')
   .option('--pretty', 'Human-readable format instead of JSONL')
+  // read/log/next default to human output and opt into --json; watch is the one
+  // command with the opposite default. Accepting --json here means the flag means
+  // the same thing everywhere, instead of being an error on exactly one command.
+  .option('--json', 'JSONL output (the default for watch; accepted for symmetry with read/log/next)')
   .option('--exec <cmd>', 'Run command for each message (env: WALKIE_MSG, WALKIE_FROM, WALKIE_TS, WALKIE_CHANNEL)')
   .option('--persist', 'Enable persistent message storage')
   .option('--from-others', 'Exclude your own messages')
@@ -733,8 +689,9 @@ program
   .description('Send a message to a channel (reads from stdin if no message given)')
   .option('--reply-to <id>', 'Mark this message as a reply to a message id')
   .option('--to <id>', 'Deliver only to this subscriber (unicast)')
-  .option('--await-reply [seconds]', 'Block until someone replies to this message (default 60s)')
+  .option('--await-reply [seconds]', 'Wait for a recipient, send, then block until someone replies (overall deadline, default 60s)')
   .option('--warn-if-unread', 'Warn on stderr if you have unread messages when sending')
+  .option('--wait-for-peer [seconds]', 'Wait for someone to be on the channel before sending (default 60s)')
   .action(async (channelArg, message, opts) => {
     try {
       // Read from stdin if no message argument provided
@@ -752,6 +709,40 @@ program
 
       const cid = clientId()
       const channel = await autoJoin(channelArg, cid)
+
+      const parseSecs = (v) => typeof v === 'string' ? Math.max(1, parseInt(v, 10) || 60) : 60
+      // --await-reply on an empty channel can only fail: the send exits 3 before any
+      // waiting happens. So it implies the peer wait, and the timeout is one overall
+      // deadline covering both halves — same rule as `read --wait --timeout`.
+      const awaitSecs = opts.awaitReply ? parseSecs(opts.awaitReply) : null
+      const awaitDeadline = awaitSecs ? Date.now() + awaitSecs * 1000 : null
+
+      // Wait for a recipient before sending. This polls status instead of retrying
+      // the send, because a send with nobody to receive it is still a send: it burns
+      // a seq and appends to persisted history, so a retry loop would write the same
+      // message into `walkie log` once per attempt for a message no one ever got.
+      if (opts.waitForPeer !== undefined || awaitSecs) {
+        const secs = opts.waitForPeer !== undefined ? parseSecs(opts.waitForPeer) : awaitSecs
+        const me = cid || 'default'
+        const deadline = Date.now() + secs * 1000
+        let found = false
+        let announced = false
+        while (Date.now() < deadline) {
+          const st = await request({ action: 'status' })
+          if (st.ok && hasRecipient((st.channels || {})[channel], me, opts.to)) { found = true; break }
+          if (!announced) {
+            const who = opts.to ? `"${opts.to}"` : 'someone'
+            console.error(`\x1b[2mwaiting up to ${secs}s for ${who} to join "${channel}"...\x1b[0m`)
+            announced = true
+          }
+          await new Promise(r => setTimeout(r, 500))
+        }
+        // On timeout fall through and send anyway. The send reports "Queued nowhere"
+        // and exits 3 exactly as it would have without the flag — a waiting period
+        // that ends by silently swallowing the message would be worse than no flag.
+        if (!found) console.error(`\x1b[33mwarning: nobody joined "${channel}" within ${secs}s — sending anyway\x1b[0m`)
+      }
+
       const sendCmd = { action: 'send', channel, message, clientId: cid }
       if (opts.replyTo) sendCmd.replyTo = opts.replyTo
       if (opts.to) sendCmd.to = opts.to
@@ -785,6 +776,12 @@ program
             // channel has more than two members.
             const who = matched.length ? ` (${matched.join(', ')})` : ''
             console.log(`Queued at ${parts.join(', ')}${who}`)
+          } else if (resp.persisted) {
+            // On a persistent channel the message was written to the store before
+            // delivery was attempted, so "reached nobody" is not "lost". Exiting 3
+            // here would tell an agent its message is gone while it sits on disk
+            // waiting for the next subscriber to read it.
+            console.log('Stored — nobody is connected yet; it will be delivered when someone joins')
           } else {
             // Nothing anywhere means the message is gone — there is no offline queue.
             console.log('Queued nowhere — no peers or subscribers on this channel')
@@ -799,9 +796,13 @@ program
         }
 
         if (opts.awaitReply) {
-          const secs = typeof opts.awaitReply === 'string'
-            ? Math.max(1, parseInt(opts.awaitReply, 10) || 60)
-            : 60
+          // Whatever the peer wait consumed comes out of the same budget, so a
+          // `--await-reply 60` never blocks for 120s in total.
+          const secs = Math.ceil((awaitDeadline - Date.now()) / 1000)
+          if (secs <= 0) {
+            console.error(`Error: no reply within ${awaitSecs}s`)
+            process.exit(EXIT.TIMEOUT)
+          }
           // Ask the daemon to watch for the reply. Polling the buffer cannot work:
           // any other reader on this identity — the background `read --wait` the
           // docs recommend — consumes the reply first, and the ack then times out
@@ -815,7 +816,7 @@ program
             console.log(formatMessage(r.reply, opts))
             return
           }
-          console.error(`Error: no reply within ${secs}s`)
+          console.error(`Error: no reply within ${awaitSecs}s`)
           process.exit(EXIT.TIMEOUT)
         }
       } else {
@@ -828,21 +829,10 @@ program
     }
   })
 
-program
-  .command('read <channel>')
-  .description('Read pending messages from a channel')
-  .option('-w, --wait', 'Block until a message arrives')
-  .option('-t, --timeout <seconds>', 'Optional timeout for --wait in seconds')
-  .option('--from-others', 'Exclude your own messages')
-  .option('--no-system', 'Exclude join/leave system messages')
-  .option('--from <name>', 'Only messages from this sender')
-  .option('--ids', 'Show message ids and reply-to references')
-  .option('--drain', 'On wake, keep collecting until the channel goes quiet')
-  .option('--settle <ms>', 'How long the channel must be quiet before --drain returns (default 200)')
-  .option('--json', 'JSONL output, one record per line')
-  .option('--utc', 'Render timestamps as UTC ISO-8601')
-  .option('--peek', 'Show buffered messages without consuming them')
-  .action(async (channelArg, opts) => {
+// `read` and `next` share one implementation. `next` is the agent loop primitive —
+// block until another participant says something real — which `read` can only express
+// as a four-flag incantation that is easy to assemble wrong.
+async function runRead(channelArg, opts) {
     try {
       const cid = clientId()
       const me = cid || 'default'
@@ -922,7 +912,43 @@ program
       console.error(`Error: ${e.message}`)
       process.exit(1)
     }
-  })
+}
+
+program
+  .command('read <channel>')
+  .description('Read pending messages from a channel')
+  .option('-w, --wait', 'Block until a message arrives')
+  .option('-t, --timeout <seconds>', 'Optional timeout for --wait in seconds')
+  .option('--from-others', 'Exclude your own messages')
+  .option('--no-system', 'Exclude join/leave system messages')
+  .option('--from <name>', 'Only messages from this sender')
+  .option('--ids', 'Show message ids and reply-to references')
+  .option('--drain', 'On wake, keep collecting until the channel goes quiet')
+  .option('--settle <ms>', 'How long the channel must be quiet before --drain returns (default 200)')
+  .option('--json', 'JSONL output, one record per line')
+  .option('--utc', 'Render timestamps as UTC ISO-8601')
+  .option('--peek', 'Show buffered messages without consuming them')
+  .action((channelArg, opts) => runRead(channelArg, opts))
+
+program
+  .command('next <channel>')
+  .description('Block until another participant sends a real message, print it, exit')
+  .option('-t, --timeout <seconds>', 'Give up after N seconds (exit 4)')
+  .option('--from <name>', 'Only messages from this sender')
+  .option('--ids', 'Show message ids and reply-to references')
+  .option('--settle <ms>', 'How long the channel must be quiet before returning (default 200)')
+  .option('--json', 'JSONL output, one record per line')
+  .option('--utc', 'Render timestamps as UTC ISO-8601')
+  .option('--include-system', 'Also return join/leave notices')
+  .action((channelArg, opts) => runRead(channelArg, {
+    ...opts,
+    wait: true,
+    drain: true,
+    fromOthers: true,
+    // makeMessageFilter drops system notices on `system === false`; commander gives
+    // us the inverse flag, so translate rather than passing --include-system through.
+    system: !!opts.includeSystem,
+  }))
 
 program
   .command('leave <channel>')
@@ -1069,7 +1095,7 @@ program
   .option('--token <token>', 'Slack bot token (or SLACK_BOT_TOKEN env var)')
   .option('--app-token <token>', 'Slack app-level token (or SLACK_APP_TOKEN env var)')
   .option('--slack-channel <id>', 'Slack channel ID or name')
-  .option('--secret <secret>', 'Custom secret (default: channel name)')
+  .option('--secret <secret>', 'Channel secret (or use channel:secret; defaults to the channel name)')
   .action(async (channelArg, opts) => {
     const { startSlackBridge } = require('../src/slack')
     const parsed = parseChannelArg(channelArg)
@@ -1098,6 +1124,8 @@ program
       console.error('Error: --slack-channel required (channel ID or name)')
       process.exit(1)
     }
+
+    warnGuessableSecret(parsed.channel, opts.secret || parsed.secret)
 
     try {
       const bridge = await startSlackBridge({

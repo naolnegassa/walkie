@@ -2,6 +2,47 @@
 
 Full reference for all `walkie` CLI commands.
 
+## walkie invite [name]
+
+Mint a channel and a random secret and print a paste-able briefing for the agents that
+will use it. Use this to start a conversation instead of inventing a channel name and
+secret by hand.
+
+```bash
+walkie invite                       # channel like duo-a1b2, random 12-byte secret
+walkie invite pairing               # channel like pairing-a1b2
+walkie invite ops:s3cret            # reprint the briefing for a channel that exists
+walkie invite --token-only          # print only "channel:secret", nothing else
+```
+
+A bare word is a **prefix** to mint under, not the whole channel name — two invites in
+one repo must not collide. An argument containing a colon is read as `channel:secret`,
+the same as everywhere else in this CLI, and reprints the briefing for that channel
+instead of minting a new one.
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--join` | No | Join the channel yourself as well as printing the briefing |
+| `--token-only` | No | Print just the `channel:secret` token (for scripts) |
+| `--persist` | No | Enable persistent message storage (implies `--join`) |
+
+**`invite` does not join you.** An inviter who joins is a subscriber that never reads,
+and it satisfies another agent's `send --wait-for-peer` — so the opening message is
+delivered into a buffer nobody drains, which is the exact failure that flag exists to
+prevent. Handing out the token is not the same as being in the room. Use `--join` when
+you actually want to participate.
+
+The briefing it prints tells the receiving agent the things agents reliably get wrong
+unprompted: pass `WALKIE_ID` on **every** command including `connect` (a name that
+changes mid-session registers you twice and your own messages start coming back),
+block with `walkie next` rather than assembling four `read` flags, and never read a
+successful send as proof anyone received it.
+
+**The token is the secret.** The topic is SHA-256(channel+secret) on a public DHT, so
+anyone holding `channel:secret` can read the channel. There is no second factor and no
+access list. Treat it like a password — in particular, do not paste one into a
+public issue or PR.
+
 ## walkie connect \<channel\>
 
 Connect to a channel. The channel argument uses `channel:secret` format.
@@ -28,51 +69,6 @@ Connected to channel "mychannel"
 - Replaces the old `create`/`join` commands
 - When a new subscriber connects, all existing subscribers on the channel receive a `[system] X joined` announcement
 
-## walkie create \<channel\> (deprecated)
-
-Create a channel and start listening for peers.
-
-```bash
-walkie create <channel> -s <secret>
-```
-
-| Option | Required | Description |
-|--------|----------|-------------|
-| `-s, --secret <secret>` | Yes | Shared secret for channel authentication |
-
-**Output on success:**
-```
-Channel "ops-room" created. Listening for peers...
-```
-
-**Notes:**
-- **Deprecated**: use `walkie connect <channel>:<secret>` instead
-- Functionally identical to `walkie join` — both call the same underlying action
-- The daemon auto-starts if not already running
-
-## walkie join \<channel\> (deprecated)
-
-Join an existing channel.
-
-```bash
-walkie join <channel> -s <secret>
-```
-
-| Option | Required | Description |
-|--------|----------|-------------|
-| `-s, --secret <secret>` | Yes | Must match the secret used by `create` |
-
-**Output on success:**
-```
-Joined channel "ops-room"
-```
-
-**Notes:**
-- **Deprecated**: use `walkie connect <channel>:<secret>` instead
-- Peer discovery happens via DHT, typically takes 1–15 seconds
-- If both agents join at nearly the same time, both will discover each other
-- Re-joining an already-joined channel is a no-op
-
 ## walkie send \<channel\> \<message\>
 
 Send a message to all connected peers on a channel.
@@ -89,6 +85,7 @@ echo "your message" | walkie send <channel>     # read from stdin (avoids shell 
 | `--to <id>` | No | Deliver only to this subscriber (unicast). Exits `3` if no local subscriber has that name; warns if peers exist, since remote delivery to a name cannot be confirmed from here |
 | `--await-reply [secs]` | No | Block until someone replies to this message (default 60s; exit `4` on timeout) |
 | `--warn-if-unread` | No | Warn on stderr if messages arrived while you were composing |
+| `--wait-for-peer [secs]` | No | Wait for someone to be on the channel before sending (default 60s) |
 
 **Coordinating over a shared resource.** Delivery is fast but not synchronous, so
 "I'll start unless you object" races the round trip. Use an explicit handshake:
@@ -105,6 +102,27 @@ registered is also resolved, so a fast peer cannot be missed.
 
 `--warn-if-unread` is the cheaper check: it tells you something landed while you were
 composing, so the premise may already be stale.
+
+**Opening a conversation.** There is no offline buffering, so the first message on a
+fresh channel is usually lost — it is sent before anyone else has connected.
+`--wait-for-peer` parks until someone is there:
+
+```bash
+walkie send ops "starting the review" --wait-for-peer 120
+```
+
+It polls presence and then sends once, rather than resending on a loop: a send with no
+recipients still burns a sequence number and a persisted-history entry, so retrying
+would write the same message into `walkie log` once per attempt for a message nobody
+got. On timeout it sends anyway and fails exactly as it would have without the flag —
+"Queued nowhere", exit `3`. With `--to`, it waits for that specific name locally, but
+any remote peer satisfies the wait, because a daemon cannot see the identities behind
+a peer connection.
+
+On a **persistent** channel (`connect --persist`) the message is written to the store
+before delivery is attempted, so reaching nobody is not the same as being lost. The
+send reports `Stored — nobody is connected yet` and exits `0`; whoever joins later
+picks it up on their first read. `--wait-for-peer` is unnecessary there.
 
 **Output on success:**
 ```
@@ -125,6 +143,39 @@ Queued at 1 peer daemon, 2 local subscribers
 Error: Not in channel: <channel>
 ```
 You must `connect` to the channel before sending (or use the `channel:secret` format to auto-connect).
+
+## walkie next \<channel\>
+
+Block until another participant sends a real message, print it, and exit. This is the
+blocking primitive for agent loops.
+
+```bash
+walkie next <channel>                 # blocks indefinitely
+walkie next <channel> --timeout 60    # exit 4 if nothing arrives in 60s
+```
+
+Exactly equivalent to `read --wait --from-others --no-system --drain`. It exists as its
+own command because that is the shape an agent loop always wants and the four flags are
+easy to assemble wrong: plain `read --wait` returns on *any* traffic, including the
+`[system] X joined` notice a joiner receives about itself, so the wake-up is spent on
+noise instead of a message.
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `-t, --timeout <secs>` | No | Give up after N seconds (exit `4`) |
+| `--from <name>` | No | Only messages from this sender |
+| `--ids` | No | Show message ids and reply-to references |
+| `--settle <ms>` | No | How long the channel must be quiet before returning (default 200) |
+| `--json` | No | JSONL output, one record per line |
+| `--utc` | No | Render timestamps as UTC ISO-8601 |
+| `--include-system` | No | Also return join/leave notices |
+
+The agent loop is: run `walkie next <channel>` in the background, and when it returns,
+act on the output, send a reply, and immediately re-arm another background `next`.
+
+Like `read --drain`, this is **not** a completeness guarantee — it collects a burst
+whose gaps are under `--settle` and anything later is missed by definition. Re-read
+before acting on anything important.
 
 ## walkie read \<channel\>
 

@@ -444,3 +444,123 @@ describe('parsePiOutput', () => {
     assert.equal(parsePiOutput(stdout).text, 'still works')
   })
 })
+
+describe('hasRecipient', () => {
+  it('a remote peer counts even though its identities are unknown', () => {
+    const { hasRecipient } = load()
+    assert.equal(hasRecipient({ peers: 1, bufferedBy: { me: 0 } }, 'me'), true)
+  })
+
+  it('you alone on the channel is not a recipient', () => {
+    const { hasRecipient } = load()
+    assert.equal(hasRecipient({ peers: 0, bufferedBy: { me: 0 } }, 'me'), false)
+    assert.equal(hasRecipient({ peers: 0, bufferedBy: { me: 7 } }, 'me'), false)
+  })
+
+  it('another local subscriber counts, even with an empty buffer', () => {
+    const { hasRecipient } = load()
+    assert.equal(hasRecipient({ peers: 0, bufferedBy: { me: 0, you: 0 } }, 'me'), true)
+  })
+
+  it('--to waits for that specific name, not for anybody', () => {
+    const { hasRecipient } = load()
+    const info = { peers: 0, bufferedBy: { me: 0, you: 0 } }
+    assert.equal(hasRecipient(info, 'me', 'bob'), false)
+    assert.equal(hasRecipient(info, 'me', 'you'), true)
+  })
+
+  it('--to accepts a peer, since a daemon cannot see names behind a peer link', () => {
+    const { hasRecipient } = load()
+    assert.equal(hasRecipient({ peers: 2, bufferedBy: { me: 0 } }, 'me', 'bob'), true)
+  })
+
+  it('falls back to the subscriber count when bufferedBy is absent', () => {
+    const { hasRecipient } = load()
+    assert.equal(hasRecipient({ peers: 0, subscribers: 2 }, 'me'), true)
+    assert.equal(hasRecipient({ peers: 0, subscribers: 1 }, 'me'), false)
+    assert.equal(hasRecipient(undefined, 'me'), false)
+  })
+})
+
+describe('mintChannel', () => {
+  it('secret is 24 hex chars of randomness, not derived from the name', () => {
+    const { mintChannel } = load()
+    const a = mintChannel('ops')
+    const b = mintChannel('ops')
+    assert.match(a.secret, /^[0-9a-f]{24}$/)
+    assert.notEqual(a.secret, b.secret)
+    assert.notEqual(a.channel, b.channel)
+  })
+
+  it('keeps the given name as a prefix and suffixes it to avoid collisions', () => {
+    const { mintChannel } = load()
+    assert.match(mintChannel('ops').channel, /^ops-[0-9a-f]{4}$/)
+  })
+
+  it('defaults the prefix and strips characters that would break channel:secret', () => {
+    const { mintChannel } = load()
+    assert.match(mintChannel().channel, /^duo-[0-9a-f]{4}$/)
+    assert.match(mintChannel(':::').channel, /^---[0-9a-f-]*$/)
+    assert.equal(mintChannel('a:b c').channel.includes(':'), false)
+  })
+})
+
+describe('invitePrompt', () => {
+  it('bakes the real channel and secret into every command it shows', () => {
+    const { invitePrompt } = load()
+    const text = invitePrompt({ channel: 'ops-1234', secret: 'deadbeef' })
+    assert.match(text, /walkie connect ops-1234:deadbeef/)
+    assert.match(text, /walkie next ops-1234/)
+    assert.match(text, /walkie leave ops-1234/)
+    assert.equal(text.includes('<channel>'), false)
+  })
+
+  it('says what this is before it says what to run', () => {
+    const { invitePrompt } = load()
+    const text = invitePrompt({ channel: 'c', secret: 's' })
+    // An agent receiving this may never have heard of walkie. The opening lines have
+    // to establish the situation before any command appears, or the first thing it
+    // sees is an install instruction for a tool it has no reason to want.
+    const firstCommand = text.indexOf('walkie connect')
+    const framing = text.indexOf('other AI agents')
+    assert.ok(framing !== -1 && framing < firstCommand, 'must explain the point up front')
+    assert.match(text.slice(0, firstCommand), /peer to peer|no server/)
+  })
+
+  it('carries the three facts agents get wrong on their own', () => {
+    const { invitePrompt } = load()
+    const text = invitePrompt({ channel: 'c', secret: 's' })
+    // Match the fact, not the sentence that carries it — earlier versions of this test
+    // pinned exact phrasing and then exact line breaks, and failed twice on rewrites
+    // that kept every fact intact. Prose is hard-wrapped, so flatten before matching.
+    const flat = text.replace(/\s+/g, ' ')
+    // WALKIE_ID on connect too, or you register twice and hear yourself.
+    assert.match(text, /WALKIE_ID=<you> walkie connect/)
+    // Every connect carries --persist, which is what makes arrival order irrelevant.
+    assert.match(text, /walkie connect c:s --persist/)
+    assert.match(flat, /catch up|catches up|stores the channel/)
+    // A send is not a delivery receipt.
+    assert.match(flat, /never proof another agent read it|never that another agent read it/)
+  })
+
+  it('never wraps a command across a line break', () => {
+    const { invitePrompt } = load()
+    // A long channel name must not push part of a command onto the next line — an
+    // agent copying `walkie leave` without its channel runs a broken command.
+    const text = invitePrompt({ channel: 'a-very-long-channel-name-for-testing', secret: 'x'.repeat(24) })
+    for (const line of text.split('\n')) {
+      if (!/walkie (connect|send|next|leave)/.test(line)) continue
+      assert.ok(/walkie (connect|send|next|leave) \S/.test(line), `command split across lines: ${line}`)
+    }
+  })
+
+  it('is self-sufficient for an agent that has never seen walkie', () => {
+    const { invitePrompt } = load()
+    const text = invitePrompt({ channel: 'c', secret: 's' })
+    const firstCommand = text.indexOf('walkie connect')
+    // How to get the tool, and what it does, both before the first thing to run.
+    assert.match(text, /npm install -g walkie-sh/)
+    assert.ok(text.indexOf('npm install -g walkie-sh') < firstCommand, 'install comes first')
+    assert.ok(text.indexOf('daemon') < firstCommand, 'the mechanism is explained up front')
+  })
+})

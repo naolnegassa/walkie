@@ -101,7 +101,7 @@ const EXIT = {
   OK: 0,
   ERROR: 1,           // generic failure, message on stderr
   NOT_IN_CHANNEL: 2,  // channel not joined on this daemon
-  NOTHING_QUEUED: 3,  // send reached no peer daemon and no local subscriber
+  NOTHING_QUEUED: 3,  // send reached nobody AND was not persisted (i.e. actually lost)
   TIMEOUT: 4,         // read --wait hit its deadline with nothing matching
 }
 
@@ -245,6 +245,106 @@ function parsePiOutput(stdout) {
   return out
 }
 
+// True when a channel has somebody to deliver to besides the caller. `bufferedBy`
+// is keyed by every local subscriber (count may be 0), so its keys are the local
+// roster; `peers` is a connection count, since a daemon never learns the identities
+// behind a remote peer. Used by `send --wait-for-peer`, which polls status rather
+// than retrying the send: a retry loop would re-run every side effect of a send
+// (seq, persisted history) once per attempt for a message nobody receives.
+// `want` narrows it to one named subscriber, for a directed send. A remote peer
+// still counts there: the daemon cannot see the names behind a peer connection, so
+// refusing to proceed would hang on a channel where the target is simply not local.
+function hasRecipient(info, me, want) {
+  if (!info) return false
+  if (info.peers > 0) return true
+  const by = info.bufferedBy
+  if (by && typeof by === 'object') {
+    const ids = Object.keys(by)
+    return want ? ids.includes(want) : ids.some(id => id !== me)
+  }
+  return want ? false : (info.subscribers || 0) > 1
+}
+
+// A random channel/secret pair. The secret is what protects the channel: topics are
+// SHA-256(channel+secret) on a public DHT, so anything guessable is world-readable.
+function mintChannel(name) {
+  const base = (name || 'duo').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 32) || 'duo'
+  return {
+    channel: `${base}-${crypto.randomBytes(2).toString('hex')}`,
+    secret: crypto.randomBytes(12).toString('hex'),
+  }
+}
+
+// The prompt a human pastes into the FIRST agent session. It is deliberately short:
+// its whole job is to get that session to run `walkie invite`, which then prints the
+// real briefing. Kept here as the single source of truth because it also appears in
+// README.md and docs/index.html, and a test asserts all three match — a stale copy on
+// the website is worse than none, since that is where new users get it.
+function starterPrompt() {
+  return `You are being connected to other AI agents working in other terminal sessions,
+possibly on other machines, so you can talk to each other directly — ask
+questions, hand off work, coordinate. walkie is the CLI that carries those
+messages: peer to peer, no server, no account.
+
+Set up: run \`walkie --version || npm install -g walkie-sh\` (needs Node 18+),
+then \`walkie invite <short-name> --about "<what we are doing here>"\`. If I have
+not told you what we are doing, ask me before running it rather than dropping
+the flag.
+
+That prints a briefing. Show it to me exactly as printed — I will paste it into
+the other sessions — and then follow it yourself.`
+}
+
+// The paste-able briefing `walkie invite` prints. It exists because every agent that
+// joins a channel needs the same six facts, and hand-written versions keep getting
+// them wrong in the same places: dropping WALKIE_ID from `connect` (which registers
+// two identities and echoes your own messages back), assembling the read primitive
+// out of four flags, and treating a send as proof of delivery.
+function invitePrompt({ channel, secret, about }) {
+  // Channel names vary in length, so the trailing comments are aligned at render
+  // time rather than hard-coded — a ragged command block reads as carelessness in
+  // the one part of this text the reader is meant to copy exactly.
+  const cmds = [
+    ['walkie --version || npm install -g walkie-sh', 'Node 18+'],
+    [`WALKIE_ID=<you> walkie connect ${channel}:${secret} --persist`, null],
+    [`WALKIE_ID=<you> walkie send ${channel} "who you are, what you are working on"`, null],
+    [`WALKIE_ID=<you> walkie next ${channel}`, 'blocks until someone else speaks'],
+  ]
+  const width = Math.max(...cmds.map(([c]) => c.length))
+  const block = cmds
+    .map(([c, note]) => `    ${note ? c.padEnd(width) + '   # ' + note : c}`)
+    .join('\n')
+
+  // A channel with no stated purpose does not produce an idle conversation — it
+  // produces an invented one. Two agents given this briefing with no task spent
+  // twenty-one messages benchmarking walkie itself, each having first said out loud
+  // that inventing work would be wrong. So the purpose is either supplied here, or
+  // its absence is named and the agents are told what to do about it.
+  const purpose = about
+    ? `\nWhat this channel is for: ${about}\n`
+    : `\nNo task set yet: say so, stay available, and ask your human for one — do not
+invent work to fill the silence.\n`
+
+  return `You are being connected to other AI agents working in other terminal sessions,
+possibly on other machines, so you can talk directly — ask questions, hand off
+work, coordinate. walkie carries the messages: peer to peer, no server, no account.
+${purpose}
+Pick a short lowercase name for yourself from the repo or task you are on, tell me
+what it is, and use it as WALKIE_ID on every command below — \`connect\` included, or
+the daemon counts you twice and your own messages come back to you.
+
+${block}
+
+\`--persist\` stores the channel, so anyone can arrive late and catch up. Introduce
+yourself right away — no first speaker, nothing to wait for. Then loop: run
+\`walkie next ${channel}\` in the BACKGROUND (run_in_background=true), reply when it
+returns, and immediately re-arm another.
+
+Messages cross in flight, so read again before claiming what anyone did or did not
+do; a send is never proof another agent read it. After ~5 exchanges, or when the
+others are done, run \`WALKIE_ID=<you> walkie leave ${channel}\` and summarize for me.`
+}
+
 function parseChannelArg(str) {
   const idx = str.indexOf(':')
   if (idx === -1) return { channel: str, secret: str }
@@ -256,6 +356,10 @@ module.exports = {
   chatName,
   parseChannelArg,
   makeMessageFilter,
+  hasRecipient,
+  mintChannel,
+  invitePrompt,
+  starterPrompt,
   EXIT,
   isWalkieProcess,
   drainAfterWake,

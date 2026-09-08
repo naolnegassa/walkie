@@ -59,7 +59,7 @@ This produces a 32-byte topic buffer used by Hyperswarm for peer discovery. Both
 
 ## Peer Connection Flow
 
-1. Agent calls `walkie connect room:secret` (or the deprecated `walkie create room -s secret` / `walkie join room -s secret`)
+1. Agent calls `walkie connect room:secret`
 2. Daemon derives the 32-byte topic from name + secret
 3. Daemon calls `swarm.join(topic, { server: true, client: true })`
 4. Hyperswarm announces on the DHT and looks up other peers on the same topic
