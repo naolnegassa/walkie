@@ -19,6 +19,24 @@ const PID_FILE = path.join(WALKIE_DIR, 'daemon.pid')
 const LOG_FILE = path.join(WALKIE_DIR, 'daemon.log')
 // How long a subscriber may sit idle and empty before being dropped.
 const SUBSCRIBER_TTL = parseInt(process.env.WALKIE_SUBSCRIBER_TTL_MS, 10) || 60 * 60 * 1000
+// How many departed identities' read positions a channel remembers. Bounded so a
+// channel that sees thousands of one-off ids cannot grow without limit; the oldest
+// mark is dropped first, and losing one only costs that identity a replay.
+const READ_MARK_LIMIT = 200
+
+function rememberReadMark(ch, id, ts) {
+  if (!ts) return
+  if (!ch.readMarks) ch.readMarks = new Map()
+  ch.readMarks.delete(id)
+  ch.readMarks.set(id, ts)
+  while (ch.readMarks.size > READ_MARK_LIMIT) {
+    ch.readMarks.delete(ch.readMarks.keys().next().value)
+  }
+}
+
+function priorReadMark(ch, id) {
+  return (ch.readMarks && ch.readMarks.get(id)) || 0
+}
 // Sweep at most once a minute, but more often when the TTL is shorter than that
 // (tests drive a very short TTL and need the sweep to actually run).
 const RECENT_REPLY_CACHE = 200
@@ -142,7 +160,7 @@ class WalkieDaemon {
             if (ch.subscribers.size > 0 || ch.peers.size > 0) {
               this._send(cmd.channel, `${id} joined`, 'system')
             }
-            ch.subscribers.set(id, { messages: [], waiters: [], lastReadTs: 0, lastSeen: Date.now() })
+            ch.subscribers.set(id, { messages: [], waiters: [], lastReadTs: priorReadMark(ch, id), lastSeen: Date.now() })
           } else {
             ch.subscribers.get(id).lastSeen = Date.now()
           }
@@ -195,7 +213,7 @@ class WalkieDaemon {
 
           // Auto-register subscriber on read if not yet joined
           if (!ch.subscribers.has(id)) {
-            ch.subscribers.set(id, { messages: [], waiters: [], lastReadTs: 0, lastSeen: Date.now() })
+            ch.subscribers.set(id, { messages: [], waiters: [], lastReadTs: priorReadMark(ch, id), lastSeen: Date.now() })
           }
           const sub = ch.subscribers.get(id)
           sub.lastSeen = Date.now()
@@ -364,6 +382,12 @@ class WalkieDaemon {
         if (sub.waiters.length > 0) continue
         if (sub.messages.length > 0) continue
         if (now - (sub.lastSeen || 0) < SUBSCRIBER_TTL) continue
+        // Keep the read position. Without it a reaped identity re-registers at
+        // lastReadTs 0, and on a persistent channel its next read replays the whole
+        // history as if it were new — an agent coming back from a quiet hour would
+        // re-process, and re-reply to, the entire conversation. The mark is a single
+        // timestamp, so remembering it costs far less than the subscriber it replaces.
+        rememberReadMark(ch, id, sub.lastReadTs)
         ch.subscribers.delete(id)
         log(`Reaped idle subscriber "${id}" from channel "${name}"`)
       }

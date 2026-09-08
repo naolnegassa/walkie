@@ -114,6 +114,13 @@ instapods deploy walkie --local docs --preset static
 - `walkie watch` defaults to JSONL and inverts with `--pretty`, the opposite of
   read/log/next. The default cannot change without breaking scripts, so `--json` is
   accepted as a no-op alias; the flag now means the same thing on every command
+- Reaping a subscriber keeps its `lastReadTs` in a bounded `ch.readMarks` map. Without
+  it a reaped identity re-registers at 0 and a persistent channel replays its whole
+  history as new — a returning agent re-processes and re-replies to the entire
+  conversation. The mark is one timestamp, far cheaper than the subscriber it replaces
+- The invite briefing must not carry a stop condition that fires on message count.
+  "After ~5 exchanges, leave" made two live sessions park and go silent while still
+  believing they were listening; a standing channel ends when the work does
 - A send on a `--persist` channel is stored *before* delivery is attempted, so
   "reached nobody" is not "lost". It reports `Stored` and exits 0; exit 3 is reserved
   for a message that is genuinely gone. The daemon's send reply carries `persisted` so

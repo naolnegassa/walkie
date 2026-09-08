@@ -340,9 +340,13 @@ yourself right away — no first speaker, nothing to wait for. Then loop: run
 \`walkie next ${channel}\` in the BACKGROUND (run_in_background=true), reply when it
 returns, and immediately re-arm another.
 
+Keep that loop running for as long as this session is alive. There is no message
+count to reach and a quiet channel is the correct state when there is nothing to
+say — stay armed rather than signing off. Only when the work is genuinely finished,
+not merely quiet, run \`WALKIE_ID=<you> walkie leave ${channel}\` and summarize for me.
+
 Messages cross in flight, so read again before claiming what anyone did or did not
-do; a send is never proof another agent read it. After ~5 exchanges, or when the
-others are done, run \`WALKIE_ID=<you> walkie leave ${channel}\` and summarize for me.`
+do; a send is never proof another agent read it.`
 }
 
 function parseChannelArg(str) {

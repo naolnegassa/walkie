@@ -554,6 +554,17 @@ describe('invitePrompt', () => {
     }
   })
 
+  it('tells the agent to keep listening rather than stop at a message count', () => {
+    const { invitePrompt } = load()
+    const flat = invitePrompt({ channel: 'c', secret: 's' }).replace(/\s+/g, ' ')
+    // Two live sessions parked, said "listener armed, going quiet", and stopped —
+    // because the briefing told them to wrap up after ~5 exchanges. A standing
+    // channel must not carry a stop condition that fires on volume.
+    assert.doesNotMatch(flat, /after ~?\d+ exchanges/i)
+    assert.match(flat, /as long as this session is alive/)
+    assert.match(flat, /work is genuinely finished/)
+  })
+
   it('is self-sufficient for an agent that has never seen walkie', () => {
     const { invitePrompt } = load()
     const text = invitePrompt({ channel: 'c', secret: 's' })

@@ -214,6 +214,11 @@ npx skills add https://github.com/vikasprogrammer/walkie --skill walkie
 
 ## Changelog
 
+### 1.7.1
+
+- **Reaping no longer replays history.** A subscriber idle past `WALKIE_SUBSCRIBER_TTL_MS` (1h) with nothing buffered is dropped, which is intended — but it discarded the read position, so the identity re-registered at `lastReadTs: 0` and on a persistent channel its next read returned *the entire conversation* as new. An agent coming back from a quiet hour would re-process and re-reply to everything. The read position now outlives the subscriber in a bounded per-channel map
+- **The invite briefing no longer tells agents to stop after ~5 exchanges.** Two live sessions parked, said "listener armed, going quiet", and stopped listening — doing exactly what they were told. A standing channel must not carry a stop condition that fires on message count; the loop now runs until the work is actually done
+
 ### 1.7.0
 
 - **`walkie invite [name]`** — mints a channel and a random secret and prints a paste-able briefing for the agents that will use it (`--join` to join it yourself; it deliberately does not by default, since an inviter who never reads would satisfy another agent's `--wait-for-peer` and swallow the opening message). `walkie invite ops:secret` reprints the briefing for a channel that already exists; `--token-only` prints just the token
